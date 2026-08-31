@@ -1,0 +1,85 @@
+<mujoco model="scene_micro">
+    <!-- Title-shot scene: the robot + the "MICRO" letters + a rubber duck,
+         with fixed cameras for filming.
+
+         robot_allcollisions.xml (not robot_walk.xml) because the duck is meant
+         to stagger and possibly touch the ground here — the walk model strips
+         trunk/head contacts.
+
+         No <keyframe>: the prop freejoints change nq, which would break
+         scene.xml's keyframe qpos sizes. The shoot script sets qpos directly,
+         same as infer_policy.py does for scene_ball.xml.
+
+         Only the I and the rubber duck are free bodies; M/C/R/O are welded to
+         the world. See LETTERS in video/make_letters.py for why. -->
+    <include file="robot_allcollisions.xml"/>
+    <include file="props_micro.xml"/>
+
+    <visual>
+        <headlight diffuse="0.55 0.55 0.55" ambient="0.32 0.32 0.34" specular="0.1 0.1 0.1"/>
+        <rgba haze="0.15 0.25 0.35 1"/>
+        <global azimuth="160" elevation="-20" offwidth="1920" offheight="1080"/>
+        <quality shadowsize="4096" offsamples="8"/>
+    </visual>
+
+    <asset>
+        <texture type="skybox" builtin="gradient" rgb1="0.22 0.32 0.5" rgb2="0.02 0.03 0.06"
+            width="512" height="3072"/>
+        <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+            rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8"
+            width="300" height="300"/>
+        <material name="groundplane" texture="groundplane" texuniform="true"
+            texrepeat="5 5" reflectance="0.25"/>
+    </asset>
+
+    <worldbody>
+        <!-- Key light from front-left, fill from the right, both casting. -->
+        <light name="key"  pos="-1.2  1.0 1.8" dir="0.5 -0.45 -1" directional="true"
+               diffuse="0.7 0.7 0.68" specular="0.2 0.2 0.2"/>
+        <light name="fill" pos="-1.0 -1.2 1.4" dir="0.4  0.55 -1" directional="true"
+               diffuse="0.35 0.35 0.4" specular="0.05 0.05 0.05"/>
+        <light name="top"  pos="0 0 3.0" dir="0 0 -1" directional="true"
+               diffuse="0.3 0.3 0.3"/>
+
+        <geom name="floor" size="0 0 0.05" pos="0 0 0" type="plane" material="groundplane"/>
+
+        <!-- ==================== cameras ====================
+             xyaxes="0 -1 0  0 0 1" -> camera right = -Y, up = +Z, so the lens
+             looks along +X and the word reads M I C R O left to right. -->
+
+        <!-- Wide master: the whole word (M at y=+0.46 .. rubber duck at
+             y=-0.69) plus room for the duck to sprint in. Centred on
+             y=-0.11, the middle of that span. -->
+        <camera name="film" pos="-1.55 -0.11 0.18" xyaxes="0 -1 0  0 0 1" fovy="40"/>
+
+        <!-- THE PAYOFF FRAME. Just the word, M to O, with the duck standing in
+             the I's gap. The whole joke is that the duck IS the I, so it has to
+             be possible to read the whole word at once: half-width here is
+             0.96*tan(20)*16/9 = 0.62 m against a 0.55 m half-word. -->
+        <camera name="film_word" pos="-1.06 0 0.13" xyaxes="0 -1 0  0 0 1" fovy="40"/>
+
+        <!-- Tighter, on the gap where the I was (y=+0.23), for the head turn.
+             CLOSE_CAM in shoot.py must match this position -- the duck aims its
+             beak at these coordinates. -->
+        <camera name="film_close" pos="-0.55 0.26 0.16" xyaxes="0 -1 0  0 0 1" fovy="38"/>
+
+        <!-- Low hero angle for the kick. The duck kicks from BEHIND the row
+             (x=+0.09) facing the lens, so this sits low and square on it. -->
+        <camera name="film_low" pos="-0.85 0.26 0.08" xyaxes="0 -1 0  0 0 1" fovy="42"/>
+
+        <!-- The sprint. Square on, close enough that the duck running along
+             x=-0.52 is BIGGER than the letters at x=0 behind it, and wide
+             enough (half-width 0.92 m) to hold the whole run. -->
+        <camera name="film_run" pos="-1.25 0 0.20" xyaxes="0 -1 0  0 0 1" fovy="45"/>
+
+        <!-- The wipeout, at the +Y end where the duck goes down. -->
+        <camera name="film_fall" pos="-1.45 0.52 0.16" xyaxes="0 -1 0  0 0 1" fovy="42"/>
+
+        <!-- High three-quarter over the +Y end of the word. The only angle that
+             sees BEHIND the letter row: anything at ground level back there is
+             hidden from a low front camera by the 0.20 m letters. Used while
+             the duck walks around the M to get behind the I. -->
+        <camera name="film_high" pos="-0.55 1.20 0.52"
+                xyaxes="-0.5606 -0.8281 0.0000  0.3907 -0.2645 0.8817" fovy="46"/>
+    </worldbody>
+</mujoco>
