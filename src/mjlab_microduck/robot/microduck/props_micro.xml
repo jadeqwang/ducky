@@ -9,7 +9,7 @@
 
          Sizing (duck stands 0.2511 m at the STAND keyframe):
            letters       0.20 m tall  = ~80% of duck height, 0.23 m pitch
-           rubber duck   0.20 m tall  = same as the letters
+           rubber duck   0.229 m tall = ~91% of Microduck height
 
          The face is a heavy serif with stroke contrast and wedge serifs (see
          make_letters.py). Letters live in the Y-Z plane, thin along X, so they
@@ -25,7 +25,9 @@
          topples rather than sliding, and the ~19 cm it moves is just the fall.
          shoot.py adds an explicit punt impulse on contact; see its PUNT block.
 
-         Only the I is a free body; see LETTERS in make_letters.py.
+         Only the I is a free body; see LETTERS in make_letters.py. The rubber
+         duck is also fixed: its rounded bath-toy body otherwise rolls onto its
+         side before the first shot, and nothing in the scene needs to move it.
 
          Freejoints are deliberately NOT named ball_free: infer_policy.py's
          _place_ball() teleports a joint by that name in front of the kicking
@@ -33,7 +35,7 @@
 
     <default>
         <default class="letter">
-            <geom type="box" rgba="0.95 0.83 0.25 1" density="180"
+            <geom type="box" rgba="0.015 0.015 0.012 1" density="180"
                   friction="0.7 0.01 0.001"/>
         </default>
     </default>
@@ -144,25 +146,35 @@
 
 
         <!-- ============ rubber duck ============
-             In line with the word, one letter-pitch after the O, facing the
-             film camera (-X) so it reads as the last character of "MICRO_".
-             0.20 m tall. Light and hollow, like the real thing. -->
-        <body name="rubber_duck" pos="0 -0.690 0.0" euler="0 0 3.1416">
-            <freejoint name="rubber_duck_free"/>
-            <geom type="ellipsoid" name="rd_body" pos="0 0 0.060"
-                  size="0.060 0.050 0.055" rgba="1.0 0.85 0.10 1" density="150"
+             In line with the word, one letter-pitch after the O.  The bill
+             points toward +Y (back toward the letters), presenting a clean
+             profile to cameras on -X.  About 0.23 m tall: visibly larger than
+             the old prop, but still shorter than Microduck. -->
+        <body name="rubber_duck" pos="0 -0.725 0.0" euler="0 0 1.5708">
+            <geom type="ellipsoid" name="rd_body" pos="-0.010 0 0.071"
+                  size="0.082 0.058 0.066" rgba="1.0 0.78 0.035 1" density="115"
                   friction="0.9 0.02 0.002"/>
-            <geom type="sphere" name="rd_head" pos="0.030 0 0.155"
-                  size="0.045" rgba="1.0 0.85 0.10 1" density="150"/>
-            <geom type="box" name="rd_beak" pos="0.088 0 0.150"
-                  size="0.028 0.012 0.009" rgba="1.0 0.45 0.05 1" density="150"/>
-            <geom type="box" name="rd_tail" pos="-0.070 0 0.098"
-                  size="0.030 0.010 0.022" rgba="1.0 0.85 0.10 1" density="150"
-                  euler="0 -0.6 0"/>
-            <geom type="sphere" name="rd_eye_l" pos="0.055 0.028 0.170"
-                  size="0.008" rgba="0.05 0.05 0.05 1" contype="0" conaffinity="0"/>
-            <geom type="sphere" name="rd_eye_r" pos="0.055 -0.028 0.170"
-                  size="0.008" rgba="0.05 0.05 0.05 1" contype="0" conaffinity="0"/>
+            <geom type="ellipsoid" name="rd_chest" pos="0.045 0 0.105"
+                  size="0.050 0.052 0.065" rgba="1.0 0.80 0.035 1" density="115"/>
+            <geom type="ellipsoid" name="rd_head" pos="0.048 0 0.179"
+                  size="0.052 0.050 0.050" rgba="1.0 0.82 0.045 1" density="115"/>
+            <geom type="ellipsoid" name="rd_beak" pos="0.105 0 0.171"
+                  size="0.038 0.029 0.015" rgba="1.0 0.34 0.025 1" density="115"/>
+            <geom type="ellipsoid" name="rd_beak_tip" pos="0.131 0 0.169"
+                  size="0.018 0.025 0.010" rgba="1.0 0.27 0.018 1" density="115"/>
+            <geom type="ellipsoid" name="rd_tail" pos="-0.087 0 0.105"
+                  size="0.041 0.036 0.026" rgba="1.0 0.78 0.035 1" density="115"
+                  euler="0 -0.48 0"/>
+            <geom type="ellipsoid" name="rd_wing_l" pos="-0.010 0.053 0.091"
+                  size="0.052 0.010 0.035" rgba="0.94 0.67 0.020 1"
+                  contype="0" conaffinity="0"/>
+            <geom type="ellipsoid" name="rd_wing_r" pos="-0.010 -0.053 0.091"
+                  size="0.052 0.010 0.035" rgba="0.94 0.67 0.020 1"
+                  contype="0" conaffinity="0"/>
+            <geom type="sphere" name="rd_eye_l" pos="0.075 0.043 0.195"
+                  size="0.0085" rgba="0.012 0.010 0.008 1" contype="0" conaffinity="0"/>
+            <geom type="sphere" name="rd_eye_r" pos="0.075 -0.043 0.195"
+                  size="0.0085" rgba="0.012 0.010 0.008 1" contype="0" conaffinity="0"/>
         </body>
     </worldbody>
 </mujoco>

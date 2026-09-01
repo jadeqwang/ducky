@@ -20,9 +20,13 @@ layout is a hard invariant shared by every policy).
 import argparse
 import math
 import os
+import subprocess
 import sys
+import tempfile
+import wave
 
 import imageio.v2 as imageio
+import imageio_ffmpeg
 import mujoco
 import numpy as np
 
@@ -42,31 +46,85 @@ PolicyInference.set_vel_cmd = _quiet_set_vel_cmd
 
 SCENE = os.path.join(REPO, "src/mjlab_microduck/robot/microduck/scene_micro.xml")
 POLICIES = os.path.join(REPO, "policies")
+DEFAULT_QUACK = os.path.join(REPO, "video", "duck-quack.wav")
 
 TIMESTEP = 0.005      # matches infer_policy.py
 DECIMATION = 4        # -> 50 Hz control
 CTRL_DT = TIMESTEP * DECIMATION
 
+
+def synthesize_quack(path, sample_rate=48_000):
+    """Write a short, deterministic toy-duck quack as 16-bit mono WAV.
+
+    Two noisy, downward-swept voiced pulses approximate the abrupt attack and
+    nasal resonance of a rubber-duck quack. This built-in sound keeps rendering
+    self-contained; --quack-wav can substitute the official Microduck chirp.
+    """
+    duration = 0.72
+    t = np.arange(int(duration * sample_rate), dtype=np.float64) / sample_rate
+    rng = np.random.default_rng(42)
+    sound = np.zeros_like(t)
+    for start, length, gain, f0, f1 in (
+        (0.00, 0.29, 1.00, 260.0, 150.0),
+        (0.34, 0.25, 0.72, 235.0, 135.0),
+    ):
+        mask = (t >= start) & (t < start + length)
+        u = (t[mask] - start) / length
+        freq = f0 + (f1 - f0) * u
+        phase = 2.0 * math.pi * np.cumsum(freq) / sample_rate
+        # Odd harmonics make the source buzzy; band-like nasal resonances and
+        # a little breath noise make it read as a quack rather than a beep.
+        voiced = (np.sin(phase) + 0.46 * np.sin(3 * phase)
+                  + 0.22 * np.sin(5 * phase))
+        nasal = 0.30 * np.sin(2.0 * math.pi * 780.0 * (t[mask] - start))
+        noise = rng.normal(0.0, 0.16, mask.sum())
+        attack = np.minimum(u / 0.025, 1.0)
+        release = np.maximum(1.0 - u, 0.0) ** 1.7
+        sound[mask] += gain * attack * release * (0.64 * voiced + nasal + noise)
+    sound = np.tanh(1.7 * sound)
+    peak = max(float(np.max(np.abs(sound))), 1e-9)
+    pcm = np.asarray(sound / peak * 0.88 * 32767.0, dtype="<i2")
+    with wave.open(path, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm.tobytes())
+
+
+def mux_quack(silent_video, quack_wav, offset, duration, output):
+    """Mux a quack into a full-length audio track, copying the video stream.
+
+    Do not use an input timestamp offset here. Some MP4 players ignore its edit
+    list and treat the short audio stream as ending near t=0. A real delay plus
+    padding produces a conventional duration-matched track in every player.
+    """
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    delay_ms = max(0, round(offset * 1000.0))
+    cmd = [
+        ffmpeg, "-y", "-loglevel", "error",
+        "-i", silent_video, "-i", quack_wav,
+        "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+        "-af", f"adelay={delay_ms}:all=1,apad",
+        "-t", f"{duration:.3f}", "-c:a", "aac", "-b:a", "160k",
+        "-movflags", "+faststart", output,
+    ]
+    subprocess.run(cmd, check=True)
+
 # Where the "I" stands in scene_micro.xml (letter pitch 0.23, see make_letters.py).
 PITCH = 0.23
 I_POS = np.array([0.0, PITCH])
 
-# Which way the duck faces when it kicks. This is forced by the head, not by
-# taste: the payoff shot is the duck turning only its HEAD to the lens, and
-# head_yaw is capped at +-1.4 rad (~80 deg, the trained joint limit), so the
-# body must already be within 80 deg of camera-facing. The duck kicks along its
-# own +X, so facing the camera means the I gets punted TOWARD the camera, which
-# in turn means the duck has to stand BEHIND the letter row to do it.
-# -125 deg sends the I toward camera-right, clearing the C/R/O in depth rather
-# than ploughing along the row into them, and leaves a 55 deg head turn.
-KICK_YAW = math.radians(-125.0)
+# Kick from the FRONT (camera side, x < 0), straight through the I's position.
+# The robot therefore faces +X for the kick.  This deliberately decouples the
+# kick heading from the final pose: after the punt it turns to PAYOFF_YAW, steps
+# into the gap, and can still perform the established head-only camera look.
+KICK_YAW = 0.0
+PAYOFF_YAW = math.radians(-125.0)
 
-# Direction the punted I is launched along. Steeper toward the camera than
-# KICK_YAW so the letter leaves the row immediately instead of tumbling down
-# it: the I is 0.20 m long and spinning, so its far end sweeps +-0.10 m and
-# will clip the C on the way past if the launch runs anywhere near parallel
-# to the word.
-PUNT_YAW = math.radians(-152.0)
+# Launch away from the front camera, angled toward screen-left so the tumbling
+# I clears the row rather than disappearing edge-on behind the C. This is the
+# exact opposite of the old back-side punt direction.
+PUNT_YAW = math.radians(28.0)
 
 # To kick the I, the duck's trunk must sit so the I lands where the kick policy
 # expects its ball: trunk + yaw_rotate(BALL_OFFSET_X, -BALL_OFFSET_ABS_Y) for a
@@ -85,21 +143,18 @@ KICK_SPOT = I_POS - np.array([
 
 # Staging marks for the opening sprint. The duck enters from screen right
 # (-Y), runs across the front of the word at x=-0.45, and wipes out past the M
-# -- the +Y end, the corner it then rounds to get behind the row.
+# before taking a direct diagonal route to the front kick mark.
 # Marks are kept short because the gait only makes ~0.12 m/s of real ground
 # speed at a 0.25 command (~0.47x commanded); long runs are just long takes.
 START = np.array([-0.52, -0.55])
 SPRINT_LANE = np.array([-0.52, 0.95])   # aim point that keeps the run parallel
                                         # to the word instead of veering into it
 SPRINT_END_Y = 0.30
-# The mark the duck rounds to get behind the letter row. The stumble carries
-# it to roughly (-0.69, +0.78), already past the M in Y, so it can head
-# straight here: that path crosses x=0 at about y=+0.74, well clear of the M's
-# right edge at y=+0.55. If a retake ever lands the fall SHORT of the M
-# (y < 0.6), the duck would walk through the letters and this needs a
-# clear-of-the-M waypoint put back in front of it.
-CORNER = np.array([0.35, 0.72])
-
+# In film_word, the duck's body first enters the right edge of frame at about
+# y=0.40 m.  Its cast shadow arrives earlier, so the otherwise empty-looking
+# tail of the recovery-to-approach cut can be skipped independently of the
+# visible walk that follows.
+WORD_CAM_BODY_ENTRY_Y = 0.40
 # The camera the duck looks into for the payoff, so head_to_cam() can aim at
 # something real. Must match scene_micro.xml's film_close.
 CLOSE_CAM = np.array([-0.55, 0.26])
@@ -126,7 +181,7 @@ class Shoot:
         self.i_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "letter_I")
         self.i_geoms = {g for g in range(model.ngeom)
                         if model.geom_bodyid[g] == self.i_bid}
-        # Everything that is NOT the robot: floor, the other letters, the
+        # Everything that is NOT the robot: floor, the other letters, and the
         # rubber duck. A contact between the I and anything outside this set is
         # the robot connecting with it.
         props = {mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, n)
@@ -138,6 +193,19 @@ class Shoot:
         self.foot_geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM,
                                            "right_foot_collision")
         self.punted = False
+        self.mouth_gid = None
+        self.mouth_closed_quat = None
+        if args.cinematic_mouth:
+            for gid in range(model.ngeom):
+                mesh_id = int(model.geom_dataid[gid])
+                mesh_name = (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_MESH, mesh_id)
+                             if mesh_id >= 0 else None)
+                if mesh_name == "jaw" and model.geom_group[gid] == 2:
+                    self.mouth_gid = gid
+                    self.mouth_closed_quat = model.geom_quat[gid].copy()
+                    break
+            if self.mouth_gid is None:
+                raise RuntimeError("cinematic mouth requested, but visual jaw mesh not found")
         self._foot_dist = None
         self._min_foot = 9.0
         self._latched = set()
@@ -217,9 +285,9 @@ class Shoot:
         """Head yaw that points the beak at a camera, from wherever the body is.
 
         Deliberately measured against the duck's ACTUAL heading each tick
-        rather than the staged KICK_YAW: the kick policy rotates the duck by a
-        variable ~10-35 deg mid-swing, so a constant baked from KICK_YAW aims
-        the payoff look off into space. Clamped to the trained joint cap.
+        rather than the staged PAYOFF_YAW: the kick and subsequent body turn
+        introduce variable drift, so a baked constant aims the payoff look off
+        into space. Clamped to the trained joint cap.
         """
         bearing = math.atan2(cam_pos[1] - self.pos[1], cam_pos[0] - self.pos[0])
         return float(np.clip(wrap(bearing - self.yaw), -1.4, 1.4))
@@ -268,8 +336,8 @@ class Shoot:
             return
         # Launch along a FIXED staged direction, not the duck's instantaneous
         # yaw: the kick policy rotates the duck a variable 10-35 deg mid-swing,
-        # and letting that steer the letter aimed it into the C, which toppled
-        # and broke the word in the payoff frame. PUNT_YAW clears the row.
+        # and letting that steer the letter can aim it into the neighboring
+        # letters. PUNT_YAW sends it behind and diagonally clear of the row.
         yaw = PUNT_YAW
         v = self.i_vadr
         self.d.qvel[v + 0] += self.args.punt_vx * math.cos(yaw)
@@ -373,6 +441,16 @@ class Shoot:
         self.p.head_offset[:] = [neck, pitch, yaw, roll]
         self.p._update_command()
 
+    def mouth(self, opening=0.0):
+        """Rotate only the rendered lower beak; physics remains the 14-DoF model."""
+        if self.mouth_gid is None:
+            return
+        angle = float(np.clip(opening, 0.0, 0.60))
+        hinge_quat = np.array([math.cos(angle / 2), 0.0,
+                               math.sin(angle / 2), 0.0])
+        mujoco.mju_mulQuat(self.m.geom_quat[self.mouth_gid],
+                           hinge_quat, self.mouth_closed_quat)
+
 
 def build_beats(s):
     """The beat sheet. Each: name, camera, on_enter, per-tick, done, timeout."""
@@ -401,16 +479,7 @@ def build_beats(s):
             done=lambda t: t > 0.8 and s.fallen(),
         ),
         dict(
-            # Lie there. The pause is the joke; without it the recovery reads
-            # as a stumble rather than a crash. FROZEN, because the standing
-            # policy starts scrambling upright the instant it is asked to, and
-            # the duck was back on its feet before the crash had registered.
-            name="sprawl", cam="film_fall", timeout=1.2, freeze=True,
-            tick=lambda t: s.p.set_vel_cmd(0.0, 0.0, 0.0),
-            done=lambda t: t > 1.0,
-        ),
-        dict(
-            # Get up. There is NO standup policy in the shipped set -- but the
+            # Get up immediately. There is NO standup policy in the shipped set -- but the
             # plain standing policy scrambles the duck back onto its feet from
             # face-down in about 3 s, which is what this beat is. (alpha_sitstand
             # does not: it stays down.) Zero command keeps the standing session
@@ -420,27 +489,23 @@ def build_beats(s):
             done=lambda t: t > 1.0 and s.upright() and s.height > 0.105,
         ),
         dict(
-            # Shake it off and round the M. Shot from the high 3/4 -- it is the only
-            # camera that sees back there, since the 0.20 m letters hide
-            # anything at ground level from a low front camera.
-            name="walk_around", cam="film_high", timeout=26.0,
-            # 0.40 is the top of the trained lin_vel_x range. This leg is a
-            # full metre of walking at ~0.47x commanded, so it is the longest
-            # beat in the film either way -- the obvious place to trim in post.
-            tick=lambda t: s.goto(CORNER, speed=0.40),
-            done=lambda t: s.dist_to(CORNER) < 0.07,
-        ),
-        dict(
-            # Coarse: get near the mark. Steering is fine here, heading is not
-            # yet critical.
-            name="approach", cam="film_high", timeout=16.0,
-            tick=lambda t: s.goto(KICK_SPOT, speed=0.32),
+            # Stay on the camera side of the title and head directly from the
+            # recovery position to the front kick mark. The old cut first
+            # rounded the M and walked a full metre behind the letters. This is
+            # mostly repetitive walking before the duck returns to the action,
+            # so compress it hard in the final cut.
+            name="approach_front", cam="film_word", timeout=16.0,
+            playback_rate=lambda: (100.0 if s.pos[1] > WORD_CAM_BODY_ENTRY_Y
+                                   else 4.0),
+            tick=lambda t: s.goto(KICK_SPOT, speed=0.36),
             done=lambda t: s.dist_to(KICK_SPOT) < 0.09,
         ),
         dict(
             # Square up BEFORE the fine placement -- turning drifts the duck
             # ~0.12 m, which would otherwise knock it straight back off its mark.
+            # Compress the necessary footwork in the final cut.
             name="square_up", cam="film_low", timeout=12.0,
+            playback_rate=2.0,
             tick=lambda t: s.face(KICK_YAW),
             done=lambda t: abs(wrap(s.yaw - KICK_YAW)) < 0.15 and t > 0.8,
         ),
@@ -464,51 +529,80 @@ def build_beats(s):
             # momentum -- changes the swing enough to miss. Measured: triggered
             # mid-stride the boot's closest approach to the letter is 8.8 cm;
             # triggered after a second of standing, from the SAME mark, it is
-            # 3.7 cm. That is the difference between a punt and a whiff.
+            # 3.7 cm. That is the difference between a punt and a whiff. Keep
+            # the full physical settle. Show its final second at real time so
+            # the cut visibly decelerates into the kick instead of snapping
+            # straight from compressed setup to contact.
             name="settle", cam="film_low", timeout=1.6,
+            playback_rate=1.0,
             tick=lambda t: s.p.set_vel_cmd(0.0, 0.0, 0.0),
             done=lambda t: t > 1.0,
         ),
         dict(
             # s.punt(t) runs every tick and fires once, at the bottom of the
-            # swing -- see Shoot.punt for why that is not a contact test.
+            # swing -- see Shoot.punt for why that is not a contact test. End
+            # this beat at that exact instant: waiting for the kick policy's
+            # full timer left a conspicuous pause after the I was already gone.
             name="kick", cam="film_low", timeout=A.kick_duration + 0.6,
             enter=lambda: s.p.trigger_behavior("kick_right"),
             tick=lambda t: s.punt(t),
-            done=lambda t: s.p.behavior_mode is None and t > 0.5,
+            done=lambda t: s.punted,
         ),
         dict(
-            # Into the gap, still facing KICK_YAW. creep() drives body-frame
-            # velocity and holds the heading, so the duck strafes in without
-            # ever turning to the camera.
+            # Stay at 1x after contact long enough to see the I launch and the
+            # kicking leg follow through. The next beat ends the kick behavior
+            # and compresses the much longer body turn.
+            name="punt_followthrough", cam="film_low", timeout=1.0,
+            playback_rate=1.0,
+            done=lambda t: t >= 0.8,
+        ),
+        dict(
+            # The front kick faces away from the lens, beyond the head joint's
+            # +-80 degree look range. Turn the BODY only after the I is gone;
+            # this restores the established final silhouette and leaves the
+            # later head turn as a distinct gesture. The walking policy only
+            # achieves ~20 deg/s at its trained yaw limit, so play this beat at
+            # 2x to show roughly half as many steps without an OOD command.
+            name="turn_for_payoff", cam="film_word", timeout=12.0,
+            playback_rate=2.0,
+            tick=lambda t: (s.p._end_behavior() if s.p.behavior_mode else None,
+                            s.face(PAYOFF_YAW)),
+            done=lambda t: abs(wrap(s.yaw - PAYOFF_YAW)) < 0.15 and t > 0.8,
+        ),
+        dict(
+            # Into the gap at the payoff heading. creep() holds orientation
+            # while correcting the position drift introduced by the turn.
             name="step_in", cam="film_word", timeout=12.0,
-            tick=lambda t: s.creep(I_POS, KICK_YAW),
+            tick=lambda t: s.creep(I_POS, PAYOFF_YAW),
             done=lambda t: s.dist_to(I_POS) < 0.05,
         ),
         dict(
             # The payoff: body stays where it is, HEAD comes round to the lens.
-            name="head_turn", cam="film_close", timeout=2.6,
+            name="head_turn", cam="film_close", timeout=1.6,
             tick=lambda t: (s.p.set_vel_cmd(0.0, 0.0, 0.0),
-                            s.head(yaw=s.head_to_cam(CLOSE_CAM) * min(t / 1.3, 1.0),
-                                   pitch=-0.14 * min(t / 1.3, 1.0))),
-            done=lambda t: t > 2.4,
+                            s.head(yaw=s.head_to_cam(CLOSE_CAM) * min(t / 1.0, 1.0),
+                                   pitch=-0.14 * min(t / 1.0, 1.0))),
+            done=lambda t: t > 1.2,
         ),
         dict(
-            # There is no jaw actuator in the 14-DoF sim model (the beak is the
-            # 15th motor on the real robot), so the "quack" is a head nod.
-            # Audio and any QUACK! title card go on in post.
-            name="quack", cam="film_close", timeout=2.6,
+            # Preserve the full head nod, but give the cinematic lower beak one
+            # open-close cycle exactly over the bundled 0.425 s quack sample.
+            name="quack", cam="film_close", timeout=1.5,
             tick=lambda t: (s.p.set_vel_cmd(0.0, 0.0, 0.0),
                             s.head(yaw=s.head_to_cam(CLOSE_CAM),
                                    pitch=-0.14 + (0.42 * math.sin(2 * math.pi * 1.6 * t)
-                                                  if t < 1.3 else 0.0))),
-            done=lambda t: t > 2.4,
+                                                  if t < 1.3 else 0.0)),
+                            s.mouth(0.52 * math.sin(math.pi * t / 0.425)
+                                    if t < 0.425 else 0.0)),
+            done=lambda t: t > 1.3,
         ),
         dict(
-            name="hold", cam="film_word", timeout=1.4,
+            # Pull back to the word master long enough to read the full title
+            # with the duck standing in the I's place.
+            name="hold", cam="film_final", timeout=1.2,
             tick=lambda t: (s.p.set_vel_cmd(0.0, 0.0, 0.0),
                             s.head(yaw=s.head_to_cam(CLOSE_CAM), pitch=-0.12)),
-            done=lambda t: t > 1.2,
+            done=lambda t: t >= 1.0,
         ),
     ]
 
@@ -535,6 +629,14 @@ def main():
     ap.add_argument("--punt-vz", type=float, default=0.95, help="launch rise (m/s)")
     ap.add_argument("--punt-spin", type=float, default=9.0, help="launch topspin (rad/s)")
     ap.add_argument("--kick-duration", type=float, default=3.0)
+    ap.add_argument("--quack", action=argparse.BooleanOptionalAction, default=True,
+                    help="mux a quack at the final head nod (default: enabled)")
+    ap.add_argument("--quack-wav", default=None,
+                    help="optional WAV to use instead of the bundled real-duck quack")
+    ap.add_argument("--cinematic-mouth", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="animate the filming-only lower beak during the quack "
+                         "(default: enabled)")
     ap.add_argument("--current-limit", type=float, default=1.75,
                     help="XL330 current limit [A]; 0 disables torque clipping")
     ap.add_argument("--cam", default=None, help="override every beat's camera")
@@ -587,17 +689,25 @@ def main():
     frames, frame_dt = [], 1.0 / args.fps
     next_frame = 0.0
     sim_t = 0.0
+    quack_time = None
 
     def grab(cam):
         renderer.update_scene(data, camera=(args.cam or cam))
         frames.append(renderer.render())
 
     for beat in build_beats(s):
+        if beat["name"] == "quack":
+            quack_time = len(frames) / args.fps
         if beat.get("enter"):
             beat["enter"]()
         t0, ticks = sim_t, 0
+        playback_rate = beat.get("playback_rate", 1.0)
+        keep_accumulator = 0.0
         while True:
             t = sim_t - t0
+            # Keep the passive cinematic hinge closed except where a beat
+            # explicitly poses it (currently the quack).
+            s.mouth(0.0)
             if beat.get("tick"):
                 beat["tick"](t)
             if beat["done"](t):
@@ -620,8 +730,13 @@ def main():
             ticks += 1
 
             if not args.stills and sim_t >= next_frame:
-                grab(beat["cam"])
                 next_frame += frame_dt
+                rate = float(playback_rate() if callable(playback_rate)
+                             else playback_rate)
+                keep_accumulator += 1.0 / rate
+                if keep_accumulator >= 1.0:
+                    grab(beat["cam"])
+                    keep_accumulator -= 1.0
 
         if args.stills:
             grab(beat["cam"])
@@ -636,7 +751,7 @@ def main():
     for name, home in (("letter_I", (0.0, PITCH)), ("letter_M", (0.0, 2 * PITCH)),
                        ("letter_C", (0.0, 0.0)), ("letter_R", (0.0, -PITCH)),
                        ("letter_O", (0.0, -2 * PITCH)),
-                       ("rubber_duck", (0.0, -3 * PITCH))):
+                       ("rubber_duck", (0.0, -3.15 * PITCH))):
         bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
         moved = np.linalg.norm(data.xpos[bid][:2] - np.array(home))
         tag = "  <-- KICKED" if name == "letter_I" and moved > 0.15 else ""
@@ -650,9 +765,29 @@ def main():
             imageio.imwrite(f"{base}_{i:02d}.png", f)
         print(f"\n{len(frames)} stills -> {base}_NN.png")
     else:
-        imageio.mimwrite(args.out, frames, fps=args.fps, quality=8,
-                         macro_block_size=1)
-        print(f"\n{len(frames)} frames ({len(frames)/args.fps:.1f}s) -> {args.out}")
+        out_dir = os.path.dirname(os.path.abspath(args.out))
+        if args.quack:
+            with tempfile.TemporaryDirectory(prefix="microduck-video-", dir=out_dir) as tmp:
+                silent = os.path.join(tmp, "silent.mp4")
+                audio = args.quack_wav or DEFAULT_QUACK
+                muxed = os.path.join(tmp, "with-quack.mp4")
+                if not os.path.isfile(audio):
+                    if args.quack_wav:
+                        raise FileNotFoundError(f"quack WAV not found: {audio}")
+                    audio = os.path.join(tmp, "quack.wav")
+                    synthesize_quack(audio)
+                imageio.mimwrite(silent, frames, fps=args.fps, quality=8,
+                                 macro_block_size=1)
+                duration = len(frames) / args.fps
+                mux_quack(silent, audio, quack_time or 0.0, duration, muxed)
+                os.replace(muxed, args.out)
+            audio_note = args.quack_wav or "bundled real-duck quack"
+            print(f"\n{len(frames)} frames ({len(frames)/args.fps:.1f}s) -> "
+                  f"{args.out}  [quack at {quack_time:.2f}s: {audio_note}]")
+        else:
+            imageio.mimwrite(args.out, frames, fps=args.fps, quality=8,
+                             macro_block_size=1)
+            print(f"\n{len(frames)} frames ({len(frames)/args.fps:.1f}s) -> {args.out}")
 
 
 if __name__ == "__main__":

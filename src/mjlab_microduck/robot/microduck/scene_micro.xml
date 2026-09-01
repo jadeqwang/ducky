@@ -58,6 +58,11 @@
              0.96*tan(20)*16/9 = 0.62 m against a 0.55 m half-word. -->
         <camera name="film_word" pos="-1.06 0 0.13" xyaxes="0 -1 0  0 0 1" fovy="40"/>
 
+        <!-- Final end card: a slightly wider version of the word master that
+             includes the rubber duck after the O.  The small offset beyond the
+             title-plus-prop midpoint visually centres their silhouettes. -->
+        <camera name="film_final" pos="-1.25 -0.145 0.13" xyaxes="0 -1 0  0 0 1" fovy="40"/>
+
         <!-- Tighter, on the gap where the I was (y=+0.23), for the head turn.
              CLOSE_CAM in shoot.py must match this position -- the duck aims its
              beak at these coordinates. -->

@@ -6,19 +6,26 @@
 
 ```bash
 uv run video/shoot.py --out video/micro.mp4      # render the mp4
+uv run video/shoot.py --no-quack                 # render silently
+uv run video/shoot.py --quack-wav voice.wav      # use a custom/official voice
+uv run video/shoot.py --no-cinematic-mouth       # keep the rendered beak closed
 uv run video/shoot.py --out /tmp/b.mp4 --stills  # one PNG per beat (fast framing check)
 uv run video/shoot.py --cam film_word            # force one camera for every beat
 uv run video/make_letters.py                     # regenerate the MICRO letters
 ```
 
 Renders offscreen, so no viewer window and no display needed. The current cut
-is 31 s.
+is about 24 s. MP4 renders include a synchronized real mallard quack by default;
+its source and CC BY-SA attribution are in
+[`duck-quack-SOURCE.md`](duck-quack-SOURCE.md). `--quack-wav` substitutes any
+preferred WAV, including an official Microduck `chirp` rendered as described
+in [`QUACK.md`](QUACK.md).
 
 ## The shot
 
 The duck sprints in across the front of a "MICRO" title, catches a toe, goes
-down face-first, picks itself up, waddles around behind the sign, punts the
-**I** out of the word, steps into the gap, and turns its head to the lens.
+down face-first, picks itself up, approaches the word from the front, punts the
+**I** away through the row, steps into the gap, and turns its head to the lens.
 
 ## The letters
 
@@ -30,11 +37,11 @@ this is code and not hand-written XML.
 
 Two things about the letters that are load-bearing:
 
-- **Only the `I` and the rubber duck are free bodies. M/C/R/O are welded to the
+- **Only the `I` is a free body. M/C/R/O and the rubber duck are welded to the
   world.** A free-standing letter is not stable: the C is asymmetric about its
   opening and topples onto its own back within a second of the sim starting,
-  every take, untouched. That also breaks the payoff, which needs `M_CRO` to
-  still read as a word.
+  every take, untouched. The rounded rubber duck similarly rolls onto its side.
+  That also breaks the payoff, which needs the title props to stay readable.
 - **The `I` is deeper along X than the other letters** (`DEPTH_I`). This is free
   — every camera that matters looks straight down +X, so depth is invisible from
   the front — and it is the difference between a boot and a whiff. See below.
@@ -83,20 +90,18 @@ Consequences baked into the script:
 - **`goto()` steers by bearing** (self-correcting for cross-track drift); **`creep()` drives body-frame velocity** to strafe onto a mark while holding a heading; **`dash()` steers without ever throttling back, for the sprint.** Use `creep` for anything where the final heading matters — `goto` rotates the duck toward its target and flips 180° on the slightest overshoot.
 - **Square up before fine placement**, since turning drifts ~0.12 m off the mark.
 
-### The head decides the whole staging
+### Kick and payoff staging
 
-The payoff is the duck turning only its **head** to the camera. `head_yaw` is
-capped at ±1.4 rad (~80°, the trained joint limit), so the body must already be
-within 80° of camera-facing — it can never look back over its shoulder. The duck
-kicks along its own +X, so facing the camera means the **I is punted toward the
-camera**, which means the duck has to stand **behind** the letter row to do it.
-That one joint limit forces the kick angle, the approach route, and the need for
-a high 3/4 camera (the only one that sees behind the row — 0.20 m letters hide
-anything at ground level from a low front camera).
+The kick now happens from the **front** of the title: the duck stands at x < 0,
+faces +X, and punts the I away through the row. The final payoff is still a
+head-only turn to camera, but `head_yaw` is capped at ±1.4 rad (~80°), so the
+duck first turns its body after the kick and then steps into the gap at the
+payoff heading. This keeps the kick route direct without sacrificing the final
+look.
 
 `head_to_cam()` measures against the duck's *actual* heading every tick, not the
-staged `KICK_YAW`, because the kick policy rotates the duck a variable 10–35°
-mid-swing and a baked constant aims the look off into space.
+staged payoff heading, because the kick and subsequent body turn introduce
+variable yaw drift and a baked constant aims the look off into space.
 
 ## The two scripted effects
 
@@ -135,7 +140,7 @@ puts +Y on screen **left**, so the word reads M I C R O left to right.
 |---|---|
 | `film_run` | the sprint — close enough that the duck is bigger than the letters behind it |
 | `film_fall` | the wipeout, sprawl and standup |
-| `film_high` | walking around behind the row (the only angle that sees back there) |
+| `film_high` | unused high 3/4 master, retained for alternate edits |
 | `film_low` | low hero angle on the kick |
 | `film_word` | **the payoff frame** — the whole word with the duck standing in the I's gap |
 | `film_close` | the head turn and quack. `CLOSE_CAM` in `shoot.py` must match its position |
@@ -143,8 +148,17 @@ puts +Y on screen **left**, so the word reads M I C R O left to right.
 
 ## Known rough edges
 
-- **`walk_around` is ~8 s of the 31 s runtime.** It is a full metre of walking at ~0.47× commanded and there is no way around it in-sim; it is the obvious place to trim in post.
-- The stumble reliably carries the duck past the M (to about y=+0.78), which is what lets it head straight for `CORNER`. If a retake ever lands the fall *short* of the M (y < 0.6), that path would walk through the letters and needs a clear-of-the-M waypoint put back in front of it.
-- No jaw actuator exists in the 14-DoF sim model (the beak is the real robot's 15th motor), so the **"quack" is a head nod**. The official synthesized voice can now be added to the rendered movie; see [`QUACK.md`](QUACK.md).
+- The post-fall approach remains entirely on the camera side of the title. If a
+  retake drifts across x=0 before reaching the mark, add a front-side waypoint
+  rather than restoring the old route behind the letters.
+- `approach_front` runs at 100× while only the duck's shadow is in the
+  `film_word` frame, then returns to 4× as soon as the body enters. The policy
+  still gets its full closed-loop setup time in simulation.
+- The final one-second plant, kick, and 0.8-second punt follow-through play at
+  1× so the I's launch is readable; the longer payoff turn then runs at 2×.
+- No jaw actuator exists in the 14-DoF physics model (the beak is the real
+  robot's 15th motor), so `shoot.py` animates the lower visual beak during the
+  head nod as a filming-only effect. It is enabled by default and synchronized
+  with the quack audio; `--no-cinematic-mouth` disables it.
 - MuJoCo has no native audio path. Sound must be synchronized and muxed into the rendered movie, but `imageio-ffmpeg` supplies an FFmpeg executable, so a system-wide install is unnecessary.
 - `--seed` exists but the gait is only weakly stochastic; retakes look very similar. Vary `--sprint-accel` / `--trip-pitch` for different wipeouts.
