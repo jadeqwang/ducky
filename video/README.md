@@ -6,6 +6,7 @@
 
 ```bash
 uv run video/shoot.py --out video/micro.mp4      # render the mp4
+uv run video/shoot.py --stomp-i --out video/micro-stomp.mp4  # jump onto the I
 uv run video/shoot.py --no-quack                 # render silently
 uv run video/shoot.py --quack-wav voice.wav      # use a custom/official voice
 uv run video/shoot.py --no-cinematic-mouth       # keep the rendered beak closed
@@ -26,6 +27,14 @@ in [`QUACK.md`](QUACK.md).
 The duck sprints in across the front of a "MICRO" title, catches a toe, goes
 down face-first, picks itself up, approaches the word from the front, punts the
 **I** away through the row, steps into the gap, and turns its head to the lens.
+
+`--stomp-i` makes an alternate take: after the same opening, the duck crouches,
+jumps onto the top of the **I**, knocks it over, recovers, and rejoins the same
+step-in/head-turn/quack payoff. The shipped policies do not include a learned
+jump, so the standing policy poses the crouch and landing while a single root
+velocity impulse supplies the ballistic flight. A small angular nudge at the
+descending top-face crossing guarantees that either landing direction topples
+the I; all subsequent contact and recovery remain physical.
 
 ## The letters
 
@@ -103,10 +112,10 @@ look.
 staged payoff heading, because the kick and subsequent body turn introduce
 variable yaw drift and a baked constant aims the look off into space.
 
-## The two scripted effects
+## The scripted effects
 
-Both are deliberate cheats, both are documented in code, and both exist because
-the physics genuinely will not do the thing:
+The scripted effects are deliberate cheats, documented in code, and exist where
+the available policies or physics genuinely will not do the thing:
 
 - **The punt** (`Shoot.punt`). The kick cannot launch a letter. A 0.20 m letter
   struck at ankle height rotates instead of translating, so it topples and lands
@@ -123,6 +132,11 @@ the physics genuinely will not do the thing:
   the stumble adds a small forward nudge plus a nose-down pitch rate — catching a
   toe — and it face-plants near where it was running. `--trip-vel`,
   `--trip-pitch`.
+- **The stomp jump** (`Shoot.jump` / `Shoot.stomp`, `--stomp-i`). There is no
+  jump policy in the shipped set. A one-shot root velocity creates the leap;
+  tune it with `--jump-vx/-vz`. As the descending duck crosses the I's top face,
+  `stomp` nudges the letter away from the approach side so it cannot balance
+  under the duck; `--stomp-spin` controls that topple.
 
 ## Four bugs worth not rediscovering
 

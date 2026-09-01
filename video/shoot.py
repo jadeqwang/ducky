@@ -141,6 +141,13 @@ KICK_SPOT = I_POS - np.array([
     _s * KICK_STANDOFF + _c * (-BALL_OFFSET_ABS_Y),
 ])
 
+# Alternate "stomp" take.  The duck launches from directly in front of the I
+# so its ballistic path crosses the top face rather than the narrow kick face.
+# There is no jump policy in the shipped policy set; the standing policy poses
+# the crouch/landing while one root-velocity impulse supplies the flight.
+JUMP_YAW = 0.0
+JUMP_SPOT = I_POS - np.array([0.14, 0.0])
+
 # Staging marks for the opening sprint. The duck enters from screen right
 # (-Y), runs across the front of the word at x=-0.45, and wipes out past the M
 # before taking a direct diagonal route to the front kick mark.
@@ -175,7 +182,7 @@ class Shoot:
         jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "trunk_base_freejoint")
         self.qadr = int(model.jnt_qposadr[jid])
         self.vadr = int(model.jnt_dofadr[jid])
-        # --- punt bookkeeping (see punt()) ---
+        # --- movable-I bookkeeping (see punt()/stomp()) ---
         ijid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "letter_I_free")
         self.i_vadr = int(model.jnt_dofadr[ijid])
         self.i_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "letter_I")
@@ -193,6 +200,8 @@ class Shoot:
         self.foot_geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM,
                                            "right_foot_collision")
         self.punted = False
+        self.jumped = False
+        self.stomped = False
         self.mouth_gid = None
         self.mouth_closed_quat = None
         if args.cinematic_mouth:
@@ -280,6 +289,40 @@ class Shoot:
         # -pitch about the lateral axis (sin y, -cos y, 0) sends the nose down.
         self.d.qvel[self.vadr + 3] += -pitch * math.sin(y)
         self.d.qvel[self.vadr + 4] += pitch * math.cos(y)
+
+    def jump(self):
+        """Launch once toward the top of the I for the alternate stomp take."""
+        if not self.latch("jump"):
+            return
+        y = self.yaw
+        self.d.qvel[self.vadr + 0] += self.args.jump_vx * math.cos(y)
+        self.d.qvel[self.vadr + 1] += self.args.jump_vx * math.sin(y)
+        self.d.qvel[self.vadr + 2] += self.args.jump_vz
+        self.jumped = True
+
+    def stomp(self):
+        """Topple the I as the descending duck reaches its top face.
+
+        The collision remains physical after this one angular nudge.  Applying
+        it at the top-face crossing makes either a feet-first or body-first
+        landing knock the prop away from the incoming duck instead of requiring
+        a particular foot contact from a policy that was never trained to jump.
+        """
+        if self.stomped or not self.jumped:
+            return
+        close = float(np.linalg.norm(self.pos - I_POS)) < 0.075
+        descending = self.d.qvel[self.vadr + 2] < 0.0
+        top_face = self.height < 0.34
+        if not (close and descending and top_face):
+            return
+        # Fall along X, away from whichever side the duck arrived on.  A tiny
+        # translation prevents the serif from balancing under the duck.
+        direction = 1.0 if self.pos[0] <= I_POS[0] else -1.0
+        v = self.i_vadr
+        self.d.qvel[v + 0] += 0.20 * direction
+        self.d.qvel[v + 4] += -self.args.stomp_spin * direction
+        self.stomped = True
+        print(f"    stomp! I falling toward {'+X' if direction > 0 else '-X'}")
 
     def head_to_cam(self, cam_pos):
         """Head yaw that points the beak at a camera, from wherever the body is.
@@ -441,6 +484,12 @@ class Shoot:
         self.p.head_offset[:] = [neck, pitch, yaw, roll]
         self.p._update_command()
 
+    def body_height(self, z=0.0):
+        """Set the standing policy's commanded body-height offset."""
+        self.p.body_cmd[:] = 0.0
+        self.p.body_cmd[2] = float(np.clip(z, -0.03, 0.03))
+        self.p._update_command()
+
     def mouth(self, opening=0.0):
         """Rotate only the rendered lower beak; physics remains the 14-DoF model."""
         if self.mouth_gid is None:
@@ -456,7 +505,7 @@ def build_beats(s):
     """The beat sheet. Each: name, camera, on_enter, per-tick, done, timeout."""
     A = s.args
 
-    return [
+    opening = [
         dict(
             # Running start. The command goes well past the trained +-0.4 and a
             # forward impulse is added on top: the point is a duck moving
@@ -497,8 +546,8 @@ def build_beats(s):
             name="approach_front", cam="film_word", timeout=16.0,
             playback_rate=lambda: (100.0 if s.pos[1] > WORD_CAM_BODY_ENTRY_Y
                                    else 4.0),
-            tick=lambda t: s.goto(KICK_SPOT, speed=0.36),
-            done=lambda t: s.dist_to(KICK_SPOT) < 0.09,
+            tick=lambda t: s.goto(JUMP_SPOT if A.stomp_i else KICK_SPOT, speed=0.36),
+            done=lambda t: s.dist_to(JUMP_SPOT if A.stomp_i else KICK_SPOT) < 0.09,
         ),
         dict(
             # Square up BEFORE the fine placement -- turning drifts the duck
@@ -506,10 +555,50 @@ def build_beats(s):
             # Compress the necessary footwork in the final cut.
             name="square_up", cam="film_low", timeout=12.0,
             playback_rate=2.0,
-            tick=lambda t: s.face(KICK_YAW),
-            done=lambda t: abs(wrap(s.yaw - KICK_YAW)) < 0.15 and t > 0.8,
+            tick=lambda t: s.face(JUMP_YAW if A.stomp_i else KICK_YAW),
+            done=lambda t: (
+                abs(wrap(s.yaw - (JUMP_YAW if A.stomp_i else KICK_YAW))) < 0.15
+                and t > 0.8
+            ),
         ),
-        dict(
+    ]
+
+    if A.stomp_i:
+        action = [
+            dict(
+                name="creep_to_jump", cam="film_low", timeout=12.0,
+                tick=lambda t: s.creep(JUMP_SPOT, JUMP_YAW, dead=0.007),
+                done=lambda t: (s.dist_to(JUMP_SPOT) < 0.012
+                                and abs(wrap(s.yaw - JUMP_YAW)) < 0.06),
+            ),
+            dict(
+                # A short, readable crouch before the impulse. The standing
+                # policy was trained for this 30 mm body-height command.
+                name="coil", cam="film_low", timeout=1.4,
+                tick=lambda t: (s.p.set_vel_cmd(0.0, 0.0, 0.0),
+                                s.body_height(-0.03)),
+                done=lambda t: t > 0.9,
+            ),
+            dict(
+                name="jump_on_i", cam="film_low", timeout=1.5,
+                playback_rate=1.0,
+                enter=lambda: (s.body_height(0.03), s.jump()),
+                tick=lambda t: s.stomp(),
+                done=lambda t: s.stomped,
+            ),
+            dict(
+                # Let the duck and letter finish the same contact event, then
+                # hand the standing policy enough time to recover its feet.
+                name="stomp_landing", cam="film_low", timeout=5.0,
+                playback_rate=1.0,
+                tick=lambda t: (s.body_height(0.0),
+                                s.p.set_vel_cmd(0.0, 0.0, 0.0)),
+                done=lambda t: t > 1.0 and s.upright() and s.height > 0.10,
+            ),
+        ]
+    else:
+        action = [
+            dict(
             # Fine: strafe onto the mark while staying square to the letter.
             # dead=0.007 overrides the usual 15 mm position dead zone: the mark
             # has to be hit to ~1 cm and the default deadband stops correcting
@@ -521,8 +610,8 @@ def build_beats(s):
             # ~10 deg mid-swing, so aim errors at trigger time are unrecoverable.
             done=lambda t: (s.dist_to(KICK_SPOT) < 0.012
                             and abs(wrap(s.yaw - KICK_YAW)) < 0.06),
-        ),
-        dict(
+            ),
+            dict(
             # PLANT. Do not delete this beat: the kick policies were trained to
             # run "from a standing start with an all-zero command", and firing
             # one straight out of the creep -- while the duck still has stride
@@ -537,8 +626,8 @@ def build_beats(s):
             playback_rate=1.0,
             tick=lambda t: s.p.set_vel_cmd(0.0, 0.0, 0.0),
             done=lambda t: t > 1.0,
-        ),
-        dict(
+            ),
+            dict(
             # s.punt(t) runs every tick and fires once, at the bottom of the
             # swing -- see Shoot.punt for why that is not a contact test. End
             # this beat at that exact instant: waiting for the kick policy's
@@ -547,15 +636,18 @@ def build_beats(s):
             enter=lambda: s.p.trigger_behavior("kick_right"),
             tick=lambda t: s.punt(t),
             done=lambda t: s.punted,
-        ),
-        dict(
+            ),
+            dict(
             # Stay at 1x after contact long enough to see the I launch and the
             # kicking leg follow through. The next beat ends the kick behavior
             # and compresses the much longer body turn.
             name="punt_followthrough", cam="film_low", timeout=1.0,
             playback_rate=1.0,
             done=lambda t: t >= 0.8,
-        ),
+            ),
+        ]
+
+    payoff = [
         dict(
             # The front kick faces away from the lens, beyond the head joint's
             # +-80 degree look range. Turn the BODY only after the I is gone;
@@ -605,6 +697,7 @@ def build_beats(s):
             done=lambda t: t >= 1.0,
         ),
     ]
+    return opening + action + payoff
 
 
 def main():
@@ -629,6 +722,14 @@ def main():
     ap.add_argument("--punt-vz", type=float, default=0.95, help="launch rise (m/s)")
     ap.add_argument("--punt-spin", type=float, default=9.0, help="launch topspin (rad/s)")
     ap.add_argument("--kick-duration", type=float, default=3.0)
+    ap.add_argument("--stomp-i", action="store_true",
+                    help="jump onto and topple the I instead of punting it")
+    ap.add_argument("--jump-vx", type=float, default=0.36,
+                    help="forward launch speed for --stomp-i (m/s)")
+    ap.add_argument("--jump-vz", type=float, default=2.05,
+                    help="upward launch speed for --stomp-i (m/s)")
+    ap.add_argument("--stomp-spin", type=float, default=4.0,
+                    help="I topple angular speed at stomp contact (rad/s)")
     ap.add_argument("--quack", action=argparse.BooleanOptionalAction, default=True,
                     help="mux a quack at the final head nod (default: enabled)")
     ap.add_argument("--quack-wav", default=None,
@@ -743,8 +844,11 @@ def main():
         print(f"  {beat['name']:<16} {sim_t - t0:5.2f}s  pos={s.pos.round(3)} "
               f"yaw={math.degrees(s.yaw):6.1f}deg  h={s.height:.3f}")
 
-    print(f"  punt fired: {s.punted}   closest boot approach to the I: "
-          f"{s._min_foot*100:.1f} cm")
+    if args.stomp_i:
+        print(f"  jump fired: {s.jumped}   stomp fired: {s.stomped}")
+    else:
+        print(f"  punt fired: {s.punted}   closest boot approach to the I: "
+              f"{s._min_foot*100:.1f} cm")
 
     # Did the kick actually connect? The letter should be metres away, not
     # centimetres -- a near miss still looks like a hit in the beat log.
@@ -754,7 +858,8 @@ def main():
                        ("rubber_duck", (0.0, -3.15 * PITCH))):
         bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
         moved = np.linalg.norm(data.xpos[bid][:2] - np.array(home))
-        tag = "  <-- KICKED" if name == "letter_I" and moved > 0.15 else ""
+        verb = "STOMPED" if args.stomp_i else "KICKED"
+        tag = f"  <-- {verb}" if name == "letter_I" and moved > 0.15 else ""
         if name == "letter_I" or moved > 0.02:
             print(f"  {name}: moved {moved*100:5.1f} cm{tag}")
 
