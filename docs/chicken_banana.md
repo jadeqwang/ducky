@@ -24,7 +24,17 @@ Training only buys what commands cannot reach: **weight shifts, stepping in time
 squats — anything where the legs move to the beat.** Those need balance the
 standing policy was not trained to hold. Nothing in this dance does.
 
-Deliverable: [`scripts/dance_sequencer.py`](../scripts/dance_sequencer.py).
+Deliverables:
+
+- [`scripts/dance_sequencer.py`](../scripts/dance_sequencer.py) — drives the real
+  robot. Stdlib-only, so it runs on the robot where the training venv does not
+  exist. `--dry-run` prints the wire traffic and needs no hardware.
+- [`video/render_chicken_banana.py`](../video/render_chicken_banana.py) — renders
+  the same dance in CPU MuJoCo for tuning. It **imports** `choreography()` from
+  the sequencer rather than copying it, so the render, the script and what ships
+  to the robot cannot drift apart. `--head-alpha` simulates the runtime's
+  low-pass.
+- [`video/chicken_banana.mp4`](../video/chicken_banana.mp4) — the current take.
 
 ---
 
